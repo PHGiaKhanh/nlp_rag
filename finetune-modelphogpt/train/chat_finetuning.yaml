@@ -1,0 +1,117 @@
+#cd /home/phgiakhanh/Desktop/code_new
+#source llm_env/bin/activate
+#cd llm-foundry/scripts/train
+#python train.py /home/phgiakhanh/Desktop/code_new/finetuning/chat_finetuning.yaml
+
+variables:
+  global_seed: 1337
+  seq_len_val: 512 # có thể tăng 1024 nếu GPU/VRAM đủ
+
+run_name: phogpt4bchat-lora-sft
+
+model:
+  name: hf_causal_lm
+  pretrained: true
+  pretrained_model_name_or_path: "vinai/PhoGPT-4B-Chat" # ĐÃ ĐỔI sang bản Chat
+  trust_remote_code: false
+  # Dùng attention thuần để tránh yêu cầu FlashAttention trên CPU
+  attn_implementation: "eager"
+  init_device: cpu # Force CPU initialization
+  config_overrides:
+    max_seq_len: ${variables.seq_len_val}
+    attn_config:
+      attn_impl: torch # an toàn; dùng flash/triton nếu GPU hỗ trợ
+      alibi: true
+      prefix_lm: false
+      attn_uses_sequence_id: false
+    init_device: cpu
+
+  # LoRA via PEFT
+  peft_config:
+    peft_type: LORA
+    task_type: CAUSAL_LM
+    r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    bias: none
+    # PhoGPT (MPT) thường có các module sau; bỏ 'gate_proj' (thuộc LLaMA) để tránh mismatch
+    target_modules: [Wqkv, out_proj, up_proj, down_proj]
+
+tokenizer:
+  name: "vinai/PhoGPT-4B-Chat" # ĐÃ ĐỔI sang bản Chat
+  kwargs:
+    use_fast: true
+    model_max_length: ${variables.seq_len_val}
+    padding_side: right
+    truncation: true
+
+train_loader:
+  name: finetuning
+  dataset:
+    hf_name: json
+    hf_kwargs:
+      data_files: "/home/phgiakhanh/Desktop/code_new/dataset/train.jsonl"
+    split: train
+    shuffle: true
+    max_seq_len: ${variables.seq_len_val}
+    shuffle_seed: ${variables.global_seed}
+    decoder_only_format: true
+    allow_pad_trimming: true
+  drop_last: true
+  num_workers: 2
+  prefetch_factor: 2
+  pin_memory: false
+
+# Không dùng eval trong lúc train
+eval_interval: "0"
+eval_first: false
+eval_subset_num_batches: -1
+
+scheduler:
+  name: cosine_with_warmup
+  t_warmup: "0.05dur"
+  alpha_f: 0.1
+
+optimizer:
+  name: decoupled_adamw
+  lr: 5.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  eps: 1.0e-8
+
+algorithms:
+  gradient_clipping:
+    clipping_type: norm
+    clipping_threshold: 1.0
+
+# Training control
+max_seq_len: ${variables.seq_len_val}
+max_duration: "1000ba"
+
+# Batch sizing
+global_train_batch_size: 8
+device_train_microbatch_size: 1
+device_eval_batch_size: 1
+
+# Precision
+precision: fp32 # CPU-only; đổi bf16/fp16 nếu dùng GPU phù hợp
+
+fsdp_config: null
+
+# Logging
+progress_bar: true
+log_to_console: true
+console_log_interval: "1ba"
+python_log_level: info
+callbacks:
+  speed_monitor: { window_size: 10 }
+  lr_monitor: {}
+  memory_monitor: {}
+  runtime_estimator: {}
+
+# Checkpoints
+save_interval: "500ba"
+save_num_checkpoints_to_keep: 2
+save_folder: "./out_checkpoints_500ba"
+
+seed: ${variables.global_seed}

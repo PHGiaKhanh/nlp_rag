@@ -1,0 +1,111 @@
+#run python /home/phgiakhanh/Desktop/code_new/new_finetuning.yaml /home/phgiakhanh/Desktop/code_new/llm-foundry/scripts/train/train.py
+
+variables:
+  global_seed: 1337
+  seq_len_val: 512 # hội thoại ngắn–vừa; nếu GPU ok có thể 1024
+
+run_name: phogpt4b-lora-sft
+
+model:
+  name: hf_causal_lm
+  pretrained: true
+  pretrained_model_name_or_path: "vinai/PhoGPT-4B" # đổi path
+  trust_remote_code: true
+  init_device: cpu # Force CPU initialization
+  config_overrides:
+    max_seq_len: ${variables.seq_len_val}
+    attn_config:
+      attn_impl: torch # an toàn cho mọi máy (flash/triton nếu GPU hỗ trợ)
+      alibi: true
+      prefix_lm: false
+      attn_uses_sequence_id: false
+    init_device: cpu # Ensure model stays on CPU
+
+  # LoRA via PEFT — cấu hình an toàn, học tốt
+  peft_config:
+    peft_type: LORA
+    task_type: CAUSAL_LM
+    r: 16 # 8–16; 16 học tốt hơn nếu đủ RAM
+    lora_alpha: 32
+    lora_dropout: 0.05
+    bias: none
+    target_modules: [Wqkv, out_proj, up_proj, down_proj, gate_proj]
+
+tokenizer:
+  name: "vinai/PhoGPT-4B"
+  kwargs:
+    use_fast: true
+    model_max_length: ${variables.seq_len_val}
+    padding_side: right
+    truncation: true
+
+train_loader:
+  name: finetuning
+  dataset:
+    hf_name: json # Format của file JSONL
+    hf_kwargs:
+      data_files: "/home/phgiakhanh/Desktop/code_new/dataset/train.jsonl"
+    split: train
+    shuffle: true
+    max_seq_len: ${variables.seq_len_val}
+    shuffle_seed: ${variables.global_seed}
+    decoder_only_format: true
+    allow_pad_trimming: true
+  drop_last: true
+  num_workers: 2 # Giảm xuống cho CPU
+  prefetch_factor: 2
+  pin_memory: false # Tắt cho CPU
+
+scheduler:
+  name: cosine_with_warmup
+  t_warmup: "0.03dur" # 3% tổng thời lượng
+  alpha_f: 0.1
+
+optimizer:
+  name: decoupled_adamw
+  lr: 2.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  eps: 1.0e-8
+
+algorithms:
+  gradient_clipping:
+    clipping_type: norm
+    clipping_threshold: 1.0
+
+# Training control
+max_seq_len: ${variables.seq_len_val}
+max_duration: "500ba" # Giảm xuống cho test nhanh, tăng lên 1000-3000ba khi train thật
+eval_interval: "0" # BỎ EVAL - đặt = 0 để không đánh giá
+eval_first: false
+eval_subset_num_batches: -1
+
+# Batch sizing
+global_train_batch_size: 8 # Giảm xuống cho CPU
+device_train_microbatch_size: 1 # giữ 1, tăng bằng grad_accum qua global
+device_eval_batch_size: 1
+
+# Precision (chọn 1 trong 3 dòng sau)
+# precision: bf16 # nếu GPU hỗ trợ bf16
+# precision: fp16 # nếu GPU không bf16 (Turing…)
+precision: fp32 # CPU-only
+
+fsdp_config: null
+
+# Logging
+progress_bar: true
+log_to_console: true
+console_log_interval: "1ba" # Log mỗi batch để thấy tiến trình rõ hơn
+python_log_level: info
+callbacks:
+  speed_monitor: { window_size: 10 } # Giảm window để update nhanh hơn
+  lr_monitor: {}
+  memory_monitor: {}
+  runtime_estimator: {}
+
+# Checkpoints
+save_interval: "250ba"
+save_num_checkpoints_to_keep: 2
+save_folder: "./out_checkpoints"
+
+seed: ${variables.global_seed}
